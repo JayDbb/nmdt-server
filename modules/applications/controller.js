@@ -1,7 +1,7 @@
 'use strict'
 
-const { eq, and } = require('drizzle-orm')
-const { applications, applicants, applicantFacts } = require('../../drizzle/schema')
+const { eq, and, inArray } = require('drizzle-orm')
+const { applications, applicants, applicantFacts, formCriteria } = require('../../drizzle/schema')
 
 const applicationsController = {
     getApplications: async (request, reply) => {
@@ -250,50 +250,110 @@ const applicationsController = {
                 })
             }
 
-            // Step 2: Create applicant facts from formData
+            // Step 2: Get form policy to extract required fields
+            const formResult = await db
+                .select()
+                .from(formCriteria)
+                .where(eq(formCriteria.formName, formId))
+                .limit(1)
+
+            if (formResult.length === 0) {
+                return reply.code(400).send({
+                    error: 'Validation failed',
+                    message: 'Form criterion not found',
+                    field: 'formId'
+                })
+            }
+
+            const formCriterion = formResult[0]
+            const policy = formCriterion.policy
+
+            // Extract field_ids from required_fields in the policy
+            const requiredFieldIds = []
+            if (policy && policy.required_fields && Array.isArray(policy.required_fields)) {
+                policy.required_fields.forEach(field => {
+                    if (field && field.field_id) {
+                        requiredFieldIds.push(field.field_id)
+                    }
+                })
+            }
+
+            // Step 3: Get existing applicant facts for required fields (if applicant exists)
+            const existingFacts = {}
+            if (finalApplicantId && requiredFieldIds.length > 0) {
+                const existingFactsResult = await db
+                    .select()
+                    .from(applicantFacts)
+                    .where(
+                        and(
+                            eq(applicantFacts.applicantId, finalApplicantId),
+                            inArray(applicantFacts.fieldId, requiredFieldIds),
+                            eq(applicantFacts.isCurrent, true)
+                        )
+                    )
+
+                existingFactsResult.forEach(fact => {
+                    existingFacts[fact.fieldId] = fact
+                })
+            }
+
+            // Step 4: Create applicant facts from formData
+            // Use formData if provided, otherwise use existing facts
             const factsCreated = []
             const factsErrors = []
+            const factsToCreate = formData || {}
 
-            if (formData && typeof formData === 'object') {
-                for (const [fieldId, value] of Object.entries(formData)) {
-                    try {
-                        // If isCurrent is true, unset previous current facts for this applicant/field
-                        await db
-                            .update(applicantFacts)
-                            .set({ isCurrent: false })
-                            .where(
-                                and(
-                                    eq(applicantFacts.applicantId, finalApplicantId),
-                                    eq(applicantFacts.fieldId, fieldId),
-                                    eq(applicantFacts.isCurrent, true)
-                                )
+            // Merge: use formData if provided, otherwise use existing facts
+            const allFieldIds = new Set([...requiredFieldIds, ...Object.keys(factsToCreate)])
+
+            for (const fieldId of allFieldIds) {
+                // Skip if we have existing fact and no new data provided
+                if (existingFacts[fieldId] && !factsToCreate[fieldId]) {
+                    continue
+                }
+
+                const value = factsToCreate[fieldId]
+                if (value === undefined || value === null) {
+                    continue
+                }
+
+                try {
+                    // If isCurrent is true, unset previous current facts for this applicant/field
+                    await db
+                        .update(applicantFacts)
+                        .set({ isCurrent: false })
+                        .where(
+                            and(
+                                eq(applicantFacts.applicantId, finalApplicantId),
+                                eq(applicantFacts.fieldId, fieldId),
+                                eq(applicantFacts.isCurrent, true)
                             )
+                        )
 
-                        const factValue = typeof value === 'object' ? value : { raw: value }
+                    const factValue = typeof value === 'object' ? value : { raw: value }
 
-                        const fact = await db
-                            .insert(applicantFacts)
-                            .values({
-                                applicantId: finalApplicantId,
-                                fieldId: fieldId,
-                                value: factValue,
-                                status: 'provided',
-                                source: 'application_submission',
-                                isCurrent: true
-                            })
-                            .returning()
-
-                        factsCreated.push(fact[0])
-                    } catch (error) {
-                        factsErrors.push({
+                    const fact = await db
+                        .insert(applicantFacts)
+                        .values({
+                            applicantId: finalApplicantId,
                             fieldId: fieldId,
-                            error: error.message || 'Failed to create fact'
+                            value: factValue,
+                            status: 'provided',
+                            source: 'application_submission',
+                            isCurrent: true
                         })
-                    }
+                        .returning()
+
+                    factsCreated.push(fact[0])
+                } catch (error) {
+                    factsErrors.push({
+                        fieldId: fieldId,
+                        error: error.message || 'Failed to create fact'
+                    })
                 }
             }
 
-            // Step 3: Create application record
+            // Step 5: Create application record
             const application = await db
                 .insert(applications)
                 .values({
@@ -307,9 +367,12 @@ const applicationsController = {
                 application: application[0],
                 applicant: applicant,
                 facts: factsCreated,
+                existingFacts: Object.values(existingFacts), // Existing facts that were found
+                requiredFields: requiredFieldIds, // Field IDs from form policy
                 summary: {
                     factsCreated: factsCreated.length,
-                    factsErrors: factsErrors.length
+                    factsErrors: factsErrors.length,
+                    existingFactsFound: Object.keys(existingFacts).length
                 },
                 ...(factsErrors.length > 0 && { factsErrors: factsErrors })
             })
@@ -329,6 +392,109 @@ const applicationsController = {
                 })
             }
             throw error
+        }
+    },
+
+    getApplicationFormData: async (request, reply) => {
+        const { db } = request.server
+        const { formId, applicantId } = request.query
+
+        if (!formId || !applicantId) {
+            return reply.code(400).send({
+                error: 'Validation failed',
+                message: 'Both formId and applicantId query parameters are required',
+                field: 'formId, applicantId'
+            })
+        }
+
+        const parsedApplicantId = parseInt(applicantId)
+
+        // Get applicant data
+        const applicantResult = await db
+            .select()
+            .from(applicants)
+            .where(eq(applicants.id, parsedApplicantId))
+            .limit(1)
+
+        if (applicantResult.length === 0) {
+            return reply.code(404).send({
+                error: 'Not found',
+                message: 'Applicant not found'
+            })
+        }
+
+        const applicant = applicantResult[0]
+
+        // Get form policy to extract required fields
+        const formResult = await db
+            .select()
+            .from(formCriteria)
+            .where(eq(formCriteria.formName, formId))
+            .limit(1)
+
+        if (formResult.length === 0) {
+            return reply.code(404).send({
+                error: 'Not found',
+                message: 'Form criterion not found'
+            })
+        }
+
+        const formCriterion = formResult[0]
+        const policy = formCriterion.policy
+
+        // Extract field_ids from required_fields in the policy
+        const requiredFieldIds = []
+        if (policy && policy.required_fields && Array.isArray(policy.required_fields)) {
+            policy.required_fields.forEach(field => {
+                if (field && field.field_id) {
+                    requiredFieldIds.push(field.field_id)
+                }
+            })
+        }
+
+        // Get existing applicant facts for required fields
+        const existingFacts = {}
+        const formData = {}
+
+        if (requiredFieldIds.length > 0) {
+            const existingFactsResult = await db
+                .select()
+                .from(applicantFacts)
+                .where(
+                    and(
+                        eq(applicantFacts.applicantId, parsedApplicantId),
+                        inArray(applicantFacts.fieldId, requiredFieldIds),
+                        eq(applicantFacts.isCurrent, true)
+                    )
+                )
+
+            existingFactsResult.forEach(fact => {
+                existingFacts[fact.fieldId] = fact
+                // Extract value for easy form pre-population
+                // If value is an object with 'raw' key, use that, otherwise use the whole value
+                if (fact.value && typeof fact.value === 'object' && 'raw' in fact.value) {
+                    formData[fact.fieldId] = fact.value.raw
+                } else {
+                    formData[fact.fieldId] = fact.value
+                }
+            })
+        }
+
+        // Combine applicant data with form data
+        // This represents what the form submission would look like
+        return {
+            formId: formId,
+            applicantId: parsedApplicantId,
+            applicant: applicant,
+            requiredFields: requiredFieldIds,
+            existingFacts: existingFacts,
+            formData: formData,
+            // Combined view: applicant data + facts = complete form submission data
+            submissionData: {
+                ...formData,
+                // Include applicant personal data that might be referenced by field_ids
+                applicant: applicant
+            }
         }
     }
 }

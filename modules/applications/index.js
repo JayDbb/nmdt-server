@@ -15,6 +15,11 @@ module.exports = fp(async function (fastify, opts) {
             schema: applicationsSchemas.getApplicationsByApplicant
         }, applicationsController.getApplicationsByApplicant)
 
+        // Get form data endpoint must come before /:id route
+        fastify.get('/form-data', {
+            schema: applicationsSchemas.getApplicationFormData
+        }, applicationsController.getApplicationFormData)
+
         // Submit endpoint must come before /:id route
         fastify.post('/submit', {
             schema: applicationsSchemas.submitApplication
