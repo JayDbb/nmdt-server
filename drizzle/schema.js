@@ -1,6 +1,7 @@
 'use strict'
 
-const { pgTable, bigint, timestamp, text, numeric, date } = require('drizzle-orm/pg-core')
+const { pgTable, bigint, timestamp, text, numeric, date, boolean, integer, jsonb, index, uniqueIndex } = require('drizzle-orm/pg-core')
+const { relations } = require('drizzle-orm')
 
 // Matches:
 // create table public.applicants (...)
@@ -20,7 +21,70 @@ const applicants = pgTable('applicants', {
   consentTimestamp: date('consent_timestamp').notNull()
 })
 
+// Matches:
+// create table public.form_criteria (...)
+const formCriteria = pgTable('form_criteria', {
+  formName: text('form_name').primaryKey(),
+  version: integer('version').notNull().default(1),
+  policy: jsonb('policy').notNull(),
+  isActive: boolean('is_active').notNull().default(true),
+  createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow()
+}, (table) => ({
+  activeIdx: index('form_criteria_active_idx').on(table.isActive),
+  policyGinIdx: index('form_criteria_policy_gin_idx').using('gin', table.policy)
+}))
+
+// Matches:
+// create table public.field_registry (...)
+const fieldRegistry = pgTable('field_registry', {
+  fieldId: text('field_id').primaryKey(),
+  title: text('title').notNull(),
+  promptTemplate: text('prompt_template').notNull(),
+  type: text('type').notNull(),
+  validation: jsonb('validation').default('{}'),
+  normalizers: jsonb('normalizers').default('{}'),
+  aliases: jsonb('aliases').default('[]'),
+  createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow()
+}, (table) => ({
+  typeIdx: index('field_registry_type_idx').on(table.type),
+  aliasesGinIdx: index('field_registry_aliases_gin_idx').using('gin', table.aliases)
+}))
+
+// Matches:
+// create table public.applicant_facts (...)
+const applicantFacts = pgTable('applicant_facts', {
+  id: bigint('id', { mode: 'number' }).generatedByDefaultAsIdentity().primaryKey(),
+  applicantId: bigint('applicant_id', { mode: 'number' }).notNull().references(() => applicants.id, { onDelete: 'cascade' }),
+  fieldId: text('field_id').notNull(),
+  value: jsonb('value').notNull(),
+  status: text('status').notNull().default('provided'),
+  source: text('source'),
+  createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  updatedAt: timestamp('updated_at', { withTimezone: true }).notNull().defaultNow(),
+  isCurrent: boolean('is_current').notNull().default(true)
+}, (table) => ({
+  lookupIdx: index('applicant_facts_lookup').on(table.applicantId, table.fieldId),
+  uniqueCurrentIdx: uniqueIndex('applicant_facts_unique_current').on(table.applicantId, table.fieldId).where(table.isCurrent.eq(true))
+}))
+
+// Define relations
+const applicantsRelations = relations(applicants, ({ many }) => ({
+  facts: many(applicantFacts)
+}))
+
+const applicantFactsRelations = relations(applicantFacts, ({ one }) => ({
+  applicant: one(applicants, {
+    fields: [applicantFacts.applicantId],
+    references: [applicants.id]
+  })
+}))
+
 module.exports = {
-  applicants
+  applicants,
+  formCriteria,
+  fieldRegistry,
+  applicantFacts
 }
 
