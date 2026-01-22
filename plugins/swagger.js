@@ -25,7 +25,8 @@ module.exports = fp(async function (fastify, opts) {
         { name: 'applicants', description: 'Applicant management endpoints' },
         { name: 'form-criteria', description: 'Form criteria management endpoints' },
         { name: 'field-registry', description: 'Field registry management endpoints' },
-        { name: 'applicant-facts', description: 'Applicant facts management endpoints' }
+        { name: 'applicant-facts', description: 'Applicant facts management endpoints' },
+        { name: 'applications', description: 'Application management endpoints' }
       ]
     }
   })

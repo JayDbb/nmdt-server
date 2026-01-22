@@ -69,9 +69,20 @@ const applicantFacts = pgTable('applicant_facts', {
   uniqueCurrentIdx: uniqueIndex('applicant_facts_unique_current').on(table.applicantId, table.fieldId).where(table.isCurrent.eq(true))
 }))
 
+// Matches:
+// create table public.applications (...)
+const applications = pgTable('applications', {
+  id: bigint('id', { mode: 'number' }).generatedByDefaultAsIdentity().primaryKey(),
+  createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  formId: text('form_id').references(() => formCriteria.formName),
+  applicants: bigint('applicants', { mode: 'number' }).references(() => applicants.id),
+  status: text('status')
+})
+
 // Define relations
 const applicantsRelations = relations(applicants, ({ many }) => ({
-  facts: many(applicantFacts)
+  facts: many(applicantFacts),
+  applications: many(applications)
 }))
 
 const applicantFactsRelations = relations(applicantFacts, ({ one }) => ({
@@ -81,10 +92,26 @@ const applicantFactsRelations = relations(applicantFacts, ({ one }) => ({
   })
 }))
 
+const applicationsRelations = relations(applications, ({ one }) => ({
+  applicant: one(applicants, {
+    fields: [applications.applicants],
+    references: [applicants.id]
+  }),
+  formCriterion: one(formCriteria, {
+    fields: [applications.formId],
+    references: [formCriteria.formName]
+  })
+}))
+
+const formCriteriaRelations = relations(formCriteria, ({ many }) => ({
+  applications: many(applications)
+}))
+
 module.exports = {
   applicants,
   formCriteria,
   fieldRegistry,
-  applicantFacts
+  applicantFacts,
+  applications
 }
 
